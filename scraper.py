@@ -52,18 +52,46 @@ def extract_object_id_mapping(obj):
             mapping.update(extract_object_id_mapping(x))
     return mapping
 
+
+# 🚀 IMPORTANT CI-SAFE ARGS
+CI_CHROME_ARGS = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-renderer-backgrounding",
+    "--disable-breakpad",
+    "--disable-client-side-phishing-detection",
+    "--no-first-run",
+    "--no-zygote",
+    "--single-process"
+]
+
+
 def scrape_once(url):
     """Load page, extract __NEXT_DATA__ JSON, return DataFrame of valid entries (may be empty)"""
     with sync_playwright() as p:
-        browser = p.chromium.launch(args=["--no-sandbox", "--disable-setuid-sandbox"], headless=True)
+        # 🔥 FIXED: full CI-safe args to prevent GitHub Actions freeze
+        browser = p.chromium.launch(
+            headless=True,
+            args=CI_CHROME_ARGS
+        )
+
         context = browser.new_context()
         page = context.new_page()
+
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        time.sleep(3)  # small wait to let JS render the script tag
+        time.sleep(3)  # small wait to let JS render
+
         html = page.content()
         browser.close()
 
-    match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html, flags=re.S)
+    match = re.search(
+        r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+        html, flags=re.S
+    )
     if not match:
         return pd.DataFrame(), None
 
@@ -99,6 +127,7 @@ def scrape_once(url):
 
     return df, data
 
+
 def append_and_save(match_id, df_new, output_dir="match_data"):
     os.makedirs(output_dir, exist_ok=True)
     out_file = os.path.join(output_dir, f"{match_id}.csv")
@@ -108,11 +137,10 @@ def append_and_save(match_id, df_new, output_dir="match_data"):
         df_final = pd.DataFrame()
 
     if df_new.empty:
-        # nothing to add
         return False
 
     df_combined = pd.concat([df_final, df_new], ignore_index=True)
-    # drop duplicates based on inning/over/ball if present
+
     drop_cols = [c for c in ["inningNumber","overNumber","ballNumber"] if c in df_combined.columns]
     if drop_cols:
         df_combined.drop_duplicates(subset=drop_cols, keep="last", inplace=True)
@@ -122,6 +150,6 @@ def append_and_save(match_id, df_new, output_dir="match_data"):
     df_combined.to_csv(out_file, index=False)
     return True
 
+
 if __name__ == "__main__":
-    # module usage: import and call scrape_once / append_and_save from orchestrator
     pass
