@@ -2,7 +2,6 @@ name: Scheduled Match Scraper
 
 on:
   schedule:
-    # run every 5 minutes
     - cron: '*/5 * * * *'
   workflow_dispatch:
 
@@ -13,13 +12,13 @@ jobs:
       - name: Checkout repo (with write)
         uses: actions/checkout@v4
         with:
-          persist-credentials: true  # allows pushing
+          persist-credentials: true
           fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.10"
+          python-version: '3.10'
 
       - name: Install dependencies
         run: |
@@ -31,17 +30,20 @@ jobs:
         env:
           SCHEDULE_PATH: "schedules/match_schedule.csv"
           OUTPUT_DIR: "match_data"
+          STATUS_DIR: "status"
         run: |
           python run_schedule.py
 
-      - name: Commit and push any changes to match_data
+      - name: Commit and push scraped CSVs and status
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add match_data || true
+          git add status || true
+          git add README.md || true
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            git commit -m "Auto-update match_data (scraped) [ci skip]" || true
+            git commit -m "Auto-update match_data/status (scraped) [ci skip]" || true
             git push origin HEAD:${{ github.ref_name }}
           fi
