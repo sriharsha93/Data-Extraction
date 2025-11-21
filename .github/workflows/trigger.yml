@@ -3,14 +3,31 @@ name: Trigger Scrape
 on:
   repository_dispatch:
     types: [run_scraper]
+  workflow_dispatch:
 
 jobs:
   run:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write   # <-- REQUIRED to push changes
+
     steps:
-    - name: Checkout
+    - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        playwright install chromium
 
     - name: Run scraper
       env:
@@ -18,15 +35,19 @@ jobs:
         OUTPUT_DIR: "match_data"
         STATUS_DIR: "status"
       run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        playwright install chromium
         python run_schedule.py
 
     - name: Commit and push results
       run: |
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git add .
-        git diff --staged --quiet || git commit -m "Auto scrape [ci skip]"
-        git push
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git add match_data || true
+        git add status || true
+        git add README.md || true
+
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+        else
+          git commit -m "Auto-update scrape data [ci skip]"
+          git push origin HEAD:${{ github.ref_name }}
+        fi
