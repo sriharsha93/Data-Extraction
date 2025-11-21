@@ -1,282 +1,261 @@
 # run_schedule.py
+
 import csv
 import os
 import time
-import multiprocessing as mp
 from datetime import datetime, timezone
 from dateutil import parser, tz
 import pandas as pd
+
 from scraper import scrape_once, append_and_save
 
 SCHEDULE_PATH = os.environ.get("SCHEDULE_PATH", "schedules/match_schedule.csv")
 OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "match_data")
-DEFAULT_INTERVAL = 60  # seconds between scrapes if not specified
+DEFAULT_INTERVAL = 60  # seconds
 STATUS_DIR = os.environ.get("STATUS_DIR", "status")
 
-# IST timezone object
 IST = tz.gettz("Asia/Kolkata")
 
+
+# -----------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------
 def load_schedule(path):
     if not os.path.exists(path):
-        print("Schedule file not found:", path)
+        print("Schedule not found:", path)
         return []
     df = pd.read_csv(path)
     return df.to_dict(orient="records")
 
+
 def parse_time_guess_ist(timestr):
-    """
-    Parse ISO-ish string. If tzinfo missing, assume IST.
-    Returns an aware datetime.
-    """
-    try:
-        dt = parser.isoparse(str(timestr))
-    except Exception as e:
-        raise
+    """Parse ISO time; assume IST if no tzinfo."""
+    dt = parser.isoparse(str(timestr))
     if dt.tzinfo is None:
-        # assume IST
         dt = dt.replace(tzinfo=IST)
     return dt
 
+
 def is_active(match_row, now_utc):
-    """Return True if now_utc is within match start/end. Handles IST naive times."""
+    """Return True if match should run at the current moment."""
     try:
-        start_raw = match_row.get("start_time")
-        end_raw = match_row.get("end_time")
-        start = parse_time_guess_ist(start_raw)
-        end = parse_time_guess_ist(end_raw)
-    except Exception as e:
-        print(f"Invalid times for {match_row.get('match_id')}: {e}")
+        start = parse_time_guess_ist(match_row["start_time"])
+        end = parse_time_guess_ist(match_row["end_time"])
+    except Exception:
         return False
 
-    # convert both to UTC for comparison
     start_utc = start.astimezone(timezone.utc)
     end_utc = end.astimezone(timezone.utc)
-    return (start_utc <= now_utc) and (now_utc <= end_utc)
 
+    return start_utc <= now_utc <= end_utc
+
+
+# -----------------------------------------------------------
+# Worker (now sequential — NO multiprocessing)
+# -----------------------------------------------------------
 def worker_task(match_row):
     match_id = str(match_row.get("match_id"))
     url = match_row.get("url")
     interval = int(match_row.get("interval_seconds") or DEFAULT_INTERVAL)
-    print(f"[{match_id}] Worker started for URL {url} (interval {interval}s)")
 
-    try:
-        end = parse_time_guess_ist(match_row.get("end_time"))
-        end_utc = end.astimezone(timezone.utc)
-    except Exception as e:
-        print(f"[{match_id}] Invalid end_time: {e}; exiting worker.")
-        return
+    print(f"[{match_id}] Starting scraper loop every {interval}s")
+    print(f"[{match_id}] URL = {url}")
+
+    # parse match end time
+    end = parse_time_guess_ist(match_row.get("end_time"))
+    end_utc = end.astimezone(timezone.utc)
 
     while datetime.now(timezone.utc) <= end_utc:
         try:
             df_new, data = scrape_once(url)
             saved = append_and_save(match_id, df_new, OUTPUT_DIR)
-            print(f"[{match_id}] Scraped rows={len(df_new)} saved={saved} time={datetime.utcnow().isoformat()}")
+            print(
+                f"[{match_id}] Scraped rows={len(df_new)} | saved={saved} | "
+                f"time={datetime.utcnow().isoformat()}"
+            )
         except Exception as e:
-            print(f"[{match_id}] Error during scrape: {e}")
+            print(f"[{match_id}] Error: {e}")
+
         time.sleep(interval)
 
-    print(f"[{match_id}] Match window ended; worker exiting.")
-    return
+    print(f"[{match_id}] Match ended, worker exiting.")
 
+
+# -----------------------------------------------------------
+# Status Dashboard
+# -----------------------------------------------------------
 def summarize_status(schedule, now_utc):
-    """
-    Build summary dictionary:
-      - next_match (by start time > now)
-      - active_matches list
-      - last_scrape_time (UTC now)
-      - rows per match (from CSVs)
-    """
     out = {}
-    # normalize schedule times into aware datetimes
     entries = []
+
     for r in schedule:
         try:
-            start = parse_time_guess_ist(r.get("start_time"))
-            end = parse_time_guess_ist(r.get("end_time"))
-            r["_start_dt"] = start
-            r["_end_dt"] = end
+            r["_start"] = parse_time_guess_ist(r["start_time"])
+            r["_end"] = parse_time_guess_ist(r["end_time"])
             entries.append(r)
         except Exception:
-            continue
+            pass
 
-    # next match (start > now)
-    future = [r for r in entries if r["_start_dt"].astimezone(timezone.utc) > now_utc]
-    future_sorted = sorted(future, key=lambda x: x["_start_dt"])
-    if future_sorted:
-        nm = future_sorted[0]
+    # Next match
+    future = [x for x in entries if x["_start"].astimezone(timezone.utc) > now_utc]
+    future = sorted(future, key=lambda r: r["_start"])
+    if future:
+        nm = future[0]
         out["next_match"] = {
-            "match_id": nm.get("match_id"),
-            "start_time_ist": nm["_start_dt"].astimezone(IST).strftime("%Y-%m-%d %H:%M:%S %Z"),
-            "url": nm.get("url")
+            "match_id": nm["match_id"],
+            "start_time_ist": nm["_start"].astimezone(IST).strftime("%Y-%m-%d %H:%M:%S %Z"),
+            "url": nm["url"],
         }
     else:
         out["next_match"] = None
 
-    # active matches
-    active = [r for r in entries if is_active(r, now_utc)]
-    active_list = []
-    for a in active:
-        mid = str(a.get("match_id"))
+    # Active matches table
+    active = [x for x in entries if is_active(x, now_utc)]
+    act_list = []
+    for m in active:
+        mid = str(m["match_id"])
         csv_path = os.path.join(OUTPUT_DIR, f"{mid}.csv")
         rows = 0
+
         if os.path.exists(csv_path):
             try:
-                df = pd.read_csv(csv_path)
-                rows = len(df)
+                rows = len(pd.read_csv(csv_path))
             except Exception:
-                rows = 0
-        active_list.append({
+                pass
+
+        act_list.append({
             "match_id": mid,
-            "start_time_ist": a["_start_dt"].astimezone(IST).strftime("%Y-%m-%d %H:%M:%S %Z"),
-            "end_time_ist": a["_end_dt"].astimezone(IST).strftime("%Y-%m-%d %H:%M:%S %Z"),
-            "url": a.get("url"),
-            "rows": rows
+            "url": m["url"],
+            "start_time_ist": m["_start"].astimezone(IST).strftime("%Y-%m-%d %H:%M:%S %Z"),
+            "end_time_ist": m["_end"].astimezone(IST).strftime("%Y-%m-%d %H:%M:%S %Z"),
+            "rows": rows,
         })
-    out["active_matches"] = active_list
+
+    out["active_matches"] = act_list
 
     out["last_scrape_time_utc"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     out["generated_at_ist"] = datetime.now(tz=IST).strftime("%Y-%m-%d %H:%M:%S %Z")
+
     return out
+
 
 def write_status_files(status, out_dir=STATUS_DIR):
     os.makedirs(out_dir, exist_ok=True)
-    json_path = os.path.join(out_dir, "status.json")
-    html_path = os.path.join(out_dir, "status.html")
 
     import json
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(status, f, indent=2, ensure_ascii=False)
 
-    # Simple HTML dashboard
-    rows_html = ""
-    for m in status.get("active_matches", []):
-        rows_html += f"""
+    # JSON
+    with open(os.path.join(out_dir, "status.json"), "w", encoding="utf-8") as f:
+        json.dump(status, f, indent=2)
+
+    # HTML Dashboard
+    active_html = ""
+    for m in status["active_matches"]:
+        active_html += f"""
         <tr>
-          <td>{m['match_id']}</td>
-          <td><a href="{m['url']}">link</a></td>
-          <td>{m['start_time_ist']}</td>
-          <td>{m['end_time_ist']}</td>
-          <td>{m['rows']}</td>
+            <td>{m['match_id']}</td>
+            <td><a href="{m['url']}">link</a></td>
+            <td>{m['start_time_ist']}</td>
+            <td>{m['end_time_ist']}</td>
+            <td>{m['rows']}</td>
         </tr>
         """
 
-    next_match_html = "None"
-    nm = status.get("next_match")
+    nm = status["next_match"]
+    nm_html = "None"
     if nm:
-        next_match_html = f"{nm['match_id']} ({nm['start_time_ist']}) <a href=\"{nm['url']}\">link</a>"
+        nm_html = f'{nm["match_id"]} ({nm["start_time_ist"]}) <a href="{nm["url"]}">link</a>'
 
-    html = f"""<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Scraper Status</title>
-  <style>
-    body{{font-family:Arial,Helvetica,sans-serif;padding:18px}}
-    table{{border-collapse:collapse;width:100%;max-width:900px}}
-    th,td{{border:1px solid #ddd;padding:8px;text-align:left}}
-    th{{background:#f3f3f3}}
-  </style>
-</head>
-<body>
-  <h2>Match Scraper Status</h2>
-  <p><strong>Generated:</strong> {status.get('generated_at_ist')}</p>
-  <p><strong>Last scrape (UTC):</strong> {status.get('last_scrape_time_utc')}</p>
-  <p><strong>Next match:</strong> {next_match_html}</p>
+    html = f"""
+    <html><body>
+    <h2>Scraper Status</h2>
+    <p><b>Generated (IST):</b> {status['generated_at_ist']}</p>
+    <p><b>Last Scrape (UTC):</b> {status['last_scrape_time_utc']}</p>
+    <p><b>Next match:</b> {nm_html}</p>
 
-  <h3>Active matches</h3>
-  <table>
-    <thead>
-      <tr><th>Match ID</th><th>URL</th><th>Start (IST)</th><th>End (IST)</th><th>Rows scraped</th></tr>
-    </thead>
-    <tbody>
-      {rows_html if rows_html else '<tr><td colspan="5">No active matches</td></tr>'}
-    </tbody>
-  </table>
-</body>
-</html>
-"""
-    with open(html_path, "w", encoding="utf-8") as f:
+    <h3>Active Matches</h3>
+    <table border="1" cellpadding="6">
+        <tr><th>ID</th><th>URL</th><th>Start</th><th>End</th><th>Rows</th></tr>
+        {active_html or '<tr><td colspan="5">None</td></tr>'}
+    </table>
+    </body></html>
+    """
+
+    with open(os.path.join(out_dir, "status.html"), "w", encoding="utf-8") as f:
         f.write(html)
-    print("Wrote status:", json_path, html_path)
+
+    print("Updated status files.")
+
 
 def update_readme_section(status, readme_path="README.md"):
-    """
-    Replace content between markers:
-    <!--SCRAPER_STATUS_START--> ... <!--SCRAPER_STATUS_END-->
-    """
-    marker_start = "<!--SCRAPER_STATUS_START-->"
-    marker_end = "<!--SCRAPER_STATUS_END-->"
-    table_rows = ""
-    for m in status.get("active_matches", []):
-        table_rows += f"| {m['match_id']} | [{m['url']}]({m['url']}) | {m['start_time_ist']} | {m['rows']} |\n"
+    start = "<!--SCRAPER_STATUS_START-->"
+    end = "<!--SCRAPER_STATUS_END-->"
 
-    if not table_rows:
-        table_rows = "| - | - | - | - |\n"
+    rows = ""
+    for m in status["active_matches"]:
+        rows += f"| {m['match_id']} | [{m['url']}]({m['url']}) | {m['start_time_ist']} | {m['rows']} |\n"
 
-    next_match = status.get("next_match")
-    next_line = "None"
-    if next_match:
-        next_line = f"{next_match['match_id']} ({next_match['start_time_ist']})"
+    if not rows:
+        rows = "| - | - | - | - |\n"
 
-    new_block = f"""
-{marker_start}
-### Scraper status (auto-generated)
-**Generated (IST):** {status.get('generated_at_ist')}  
-**Last scrape (UTC):** {status.get('last_scrape_time_utc')}  
+    nm = status["next_match"]
+    next_line = "None" if not nm else f"{nm['match_id']} ({nm['start_time_ist']})"
 
-**Next match:** {next_line}
+    block = f"""
+{start}
+### Scraper status
+Generated (IST): **{status['generated_at_ist']}**  
+Last scrape (UTC): **{status['last_scrape_time_utc']}**
 
-**Active matches and rows scraped:**  
+**Next Match:** {next_line}
 
 | Match ID | URL | Start (IST) | Rows |
-|---:|---|---|---|
-{table_rows}
-{marker_end}
+|---|---|---|---|
+{rows}
+{end}
 """.strip()
 
-    # create README.md if missing
     if not os.path.exists(readme_path):
-        with open(readme_path, "w", encoding="utf-8") as f:
-            f.write(new_block + "\n")
+        with open(readme_path, "w") as f:
+            f.write(block)
         return
 
-    with open(readme_path, "r", encoding="utf-8") as f:
-        content = f.read()
+    txt = open(readme_path, "r", encoding="utf-8").read()
 
-    if marker_start in content and marker_end in content:
-        pre = content.split(marker_start)[0]
-        post = content.split(marker_end)[1]
-        updated = pre + new_block + post
+    if start in txt and end in txt:
+        before = txt.split(start)[0]
+        after = txt.split(end)[1]
+        new_txt = before + block + after
     else:
-        # append at end
-        updated = content + "\n\n" + new_block
+        new_txt = txt + "\n\n" + block
 
     with open(readme_path, "w", encoding="utf-8") as f:
-        f.write(updated)
+        f.write(new_txt)
 
+
+# -----------------------------------------------------------
+# MAIN
+# -----------------------------------------------------------
 def main():
     now_utc = datetime.now(timezone.utc)
     schedule = load_schedule(SCHEDULE_PATH)
-    # spawn active workers
-    active = [row for row in schedule if is_active(row, now_utc)]
+
+    # Run workers sequentially (GitHub Actions-safe)
+    active = [r for r in schedule if is_active(r, now_utc)]
 
     if active:
-        procs = []
         for row in active:
-            p = mp.Process(target=worker_task, args=(row,))
-            p.start()
-            procs.append(p)
-        # join: allow workers to run until they finish
-        for p in procs:
-            p.join()
+            print(f"\n===== Running worker for match {row.get('match_id')} =====")
+            worker_task(row)
     else:
         print("No active matches at", now_utc.isoformat())
 
-    # After one run spawn status files
+    # Update status files
     status = summarize_status(schedule, now_utc)
-    write_status_files(status, STATUS_DIR)
+    write_status_files(status)
     update_readme_section(status)
     print("Status updated.")
+
 
 if __name__ == "__main__":
     main()
