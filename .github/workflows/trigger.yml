@@ -13,37 +13,28 @@ jobs:
       contents: write
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout repo
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
-    - uses: actions/setup-python@v4
+    - name: Setup Python
+      uses: actions/setup-python@v4
       with:
-        python-version: '3.10'
+        python-version: "3.10"
 
-    - name: Install system dependencies for Chromium
+    - name: Install Playwright and system deps
       run: |
         sudo apt-get update
-        sudo apt-get install -y \
-          xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
-          libxkbcommon0 libnspr4 libxcomposite1 libxdamage1 libxrandr2 \
-          libasound2 libpangocairo-1.0-0 libpangoft2-1.0-0
-
-    - name: Install Python dependencies
-      run: |
+        sudo apt-get install -y libxkbcommon0 libnss3 libnspr4 libatk1.0-0 \
+          libatk-bridge2.0-0 libcups2 libxcomposite1 libxdamage1 libxrandr2 \
+          libasound2 libpangocairo-1.0-0 libpangoft2-1.0-0 libdrm2
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        playwright install chromium
-
-    - name: Start virtual display (Xvfb)
-      run: |
-        Xvfb :99 -screen 0 1280x1024x24 &
-      env:
-        DISPLAY: :99
+        playwright install --with-deps chromium
 
     - name: Run scraper
       env:
-        DISPLAY: :99
         SCHEDULE_PATH: "schedules/match_schedule.csv"
         OUTPUT_DIR: "match_data"
         STATUS_DIR: "status"
@@ -57,6 +48,7 @@ jobs:
         git add match_data || true
         git add status || true
         git add README.md || true
+
         if git diff --staged --quiet; then
           echo "No changes to commit"
         else
