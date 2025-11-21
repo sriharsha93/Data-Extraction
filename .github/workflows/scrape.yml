@@ -9,6 +9,9 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write
+
     steps:
     - name: Checkout repo
       uses: actions/checkout@v4
@@ -45,6 +48,6 @@ jobs:
         if git diff --staged --quiet; then
           echo "No changes to commit"
         else
-          git commit -m "Auto-update data [ci skip]"
+          git commit -m "Auto-update scraped data [ci skip]" || true
           git push origin HEAD:${{ github.ref_name }}
         fi
